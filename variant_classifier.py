@@ -1,5 +1,8 @@
+from TsvWriter import TsvWriter
+from SplitDatasetLoader import SplitDataloader
 import datetime
 import sys
+import os
 from os import path
 import numpy
 import torch
@@ -11,10 +14,112 @@ from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Dataset
 import torch.nn.functional as F
+import h5py
 
 
 # results indices:
-PERCENT_MATCHES, MATCHES, CONFUSION_VECTORS, N_FALSE_NEG, N_FALSE_POS, N_TRUE_NEG, N_TRUE_POS = 0,1,2,3,4,5,6
+PERCENT_MATCHES, MATCHES, CONFUSION_VECTORS, N_FALSE_NEG, N_FALSE_POS, N_TRUE_NEG, N_TRUE_POS, SENSITIVITY, PRECISION = 0,1,2,3,4,5,6,7,8
+
+
+class ResultsHandler:
+    def __init__(self, y_matrix, y_predict_matrix, x_matrix, metadata_matrix, dataset_train_length, dataset_test_length, loss_per_iteration, learning_rate, weight_decay, loss_fn, optimizer, model, header, output_directory="output/"):
+        self.directory = output_directory
+        self.y_matrix = y_matrix
+        self.y_predict_matrix = y_predict_matrix
+        self.x_matrix = x_matrix
+        self.metadata_matrix = metadata_matrix
+        self.header = header
+        self.dataset_train_length = dataset_train_length
+        self.dataset_test_length = dataset_test_length
+        self.loss_per_iteration = loss_per_iteration
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.loss_fn = loss_fn
+        self.model = model
+        self.optimizer = optimizer
+
+        self.datetime_string = '-'.join(list(map(str, datetime.datetime.now().timetuple()))[:-1])
+        self.directory = path.join(self.directory, 'run_' + self.datetime_string)
+        self.tsv_writer = TsvWriter(output_directory=self.directory, filename_prefix="results", header=self.header)
+
+        # ensure output directory exists
+        if not path.exists(self.directory):
+            os.mkdir(self.directory)
+
+    def write_model_state_file(self):
+        # save model file with unique datetime suffix
+        torch.save(self.model.state_dict(), path.join(self.directory, "model"))
+
+    def write_performance_stats(self):
+        self.stats = calculate_testing_stats(y_matrix=self.y_matrix,
+                                             y_predict_matrix=self.y_predict_matrix,
+                                             x_matrix=self.x_matrix,
+                                             metadata_matrix=self.metadata_matrix,
+                                             output_directory=self.directory)
+
+        results = [self.learning_rate, self.weight_decay, self.stats[N_FALSE_NEG], self.stats[N_FALSE_POS],
+                   self.stats[N_TRUE_NEG], self.stats[N_TRUE_POS], self.stats[SENSITIVITY], self.stats[PRECISION]]
+
+        self.tsv_writer.append_row(results)
+
+    def save_full_output(self, y, y_predict_logits, metadata, output_directory):
+        data = numpy.concatenate((y, y_predict_logits, metadata), axis=1)
+
+        print(data.shape)
+
+        filename = "truth_vs_prediction.npz"
+        write_dataset(output_dir=output_directory,
+                      filename=filename,
+                      data=data)
+
+    def write_full_output_dataset(self):
+        self.save_full_output(y=self.y_matrix,
+                              y_predict_logits=self.y_predict_matrix,
+                              output_directory=self.directory,
+                              metadata=self.metadata_matrix)
+
+    def save_loss_plot(self, show=False):
+        fig = pyplot.figure()
+        fig.set_size_inches(10, 8)
+        ax = pyplot.axes()
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Loss")
+        x_loss = list(range(len(self.loss_per_iteration)))
+        pyplot.plot(x_loss, self.loss_per_iteration)
+
+        if show:
+            fig.show()
+
+        t = datetime.datetime
+        datetime_string = '-'.join(list(map(str, t.now().timetuple()))[:-1])
+        fig.savefig(path.join(self.directory, "loss_" + datetime_string))
+        pyplot.close()
+
+    def write_parameter_info(self):
+        with open(path.join(self.directory, "parameters"), 'w') as out_file:
+            out_file.write("Train set size: " + str(self.dataset_train_length) + '\n')
+            out_file.write("Test set size: " + str(self.dataset_test_length) + '\n')
+            out_file.write("learning rate: " + str(self.learning_rate) + '\n')
+            out_file.write("weight decay: " + str(self.weight_decay) + '\n')
+            out_file.write("optimizer: " + str(self.optimizer) + '\n')
+            out_file.write("loss function: " + str(self.loss_fn) + '\n')
+            out_file.write("model: " + str(self.model) + '\n')
+
+    def print_parameter_info(self):
+        print("Train set size: ", self.dataset_train_length)
+        print("Test set size: ", self.dataset_test_length)
+        print("learning rate: ", self.learning_rate)
+        print("weight decay: ", self.weight_decay)
+        print("optimizer: ", self.optimizer)
+        print("loss function: ", self.loss_fn)
+        print("model: ", self.model)
+
+    def print_performance_stats(self):
+        print("Total sensitivity\t", float(self.stats[N_TRUE_POS]) / (self.stats[N_TRUE_POS] + self.stats[N_FALSE_NEG]))
+        print("false negatives\t", self.stats[N_FALSE_NEG])
+        print("false positives\t", self.stats[N_TRUE_NEG])
+        print("true negatives\t", self.stats[N_FALSE_POS])
+        print("true positives\t", self.stats[N_TRUE_POS])
 
 
 class ShallowLinear(nn.Module):
@@ -27,7 +132,7 @@ class ShallowLinear(nn.Module):
         self.layer_sizes = [27, 64, 1]
         D_in, H1, D_out = self.layer_sizes
 
-        print(D_in, H1, D_out)
+        # print(D_in, H1, D_out)
 
         self.linear1 = nn.Linear(D_in, H1)
         self.relu1 = nn.ReLU()
@@ -56,7 +161,7 @@ class Linear(nn.Module):
         self.layer_sizes = [27, 1]
         D_in, D_out = self.layer_sizes
 
-        print(D_in, D_out)
+        # print(D_in, D_out)
 
         self.linear1 = nn.Linear(D_in, D_out)
         self.sigmoid1 = nn.Sigmoid()
@@ -72,7 +177,7 @@ class Linear(nn.Module):
 class CandidateAlleleDataset(Dataset):
     def __init__(self, data):
         # check if path exists
-        print(data.shape)
+        # print(data.shape)
 
         x = data[:,6:-1]
         y = data[:,-1:]
@@ -97,23 +202,54 @@ class CandidateAlleleDataset(Dataset):
         return self.length
 
 
-def plot_loss(losses, show=True):
-    ax = pyplot.axes()
-    ax.set_xlabel("Batch (n=%d)")
-    ax.set_ylabel("Loss")
-    x_loss = list(range(len(losses)))
-    pyplot.plot(x_loss, losses)
+class CandidateAlleleH5Dataset(Dataset):
+    """
+    If dataset is too large to load into memory, and exists in h5py format, use this
+    A list of indices defining the subset of the full dataset must be provided.
+    """
+    def __init__(self, h5_dataset, indices):
+        # check if path exists
+        self.data = h5_dataset
+        self.indices = indices
+        self.length = len(indices)
 
-    if show:
-        pyplot.show()
+        self.x_dtype = torch.FloatTensor
+        self.y_dtype = torch.FloatTensor     # for MSE Loss or BCE loss
+        # self.y_dtype = torch.LongTensor      # for CE Loss
 
-    pyplot.close()
+
+    def __getitem__(self, index):
+        index = self.indices[index]
+
+        x = self.data[index, 6:-1]
+        y = self.data[index, -1:]
+        metadata = self.data[index, :5]
+
+        # print(x.shape, y.shape, metadata.shape)
+
+        x_data = torch.from_numpy(x).type(self.x_dtype)
+        y_data = torch.from_numpy(y).type(self.y_dtype)
+
+        return x_data, y_data, metadata
+
+    def __len__(self):
+        return self.length
+
+
+def subset_coordinates_by_positive_prediction(x_matrix, y_predict_matrix):
+    coordinates = x_matrix[:,:2]
+    positive_mask = (y_predict_matrix == 1)
+
+    return coordinates[positive_mask]
 
 
 def save_full_output(y, y_predict_logits, metadata, output_directory):
+    if not path.exists(output_directory):
+        os.mkdir(output_directory)
+
     data = numpy.concatenate((y, y_predict_logits, metadata), axis=1)
 
-    print(data.shape)
+    # print(data.shape)
 
     filename = "truth_vs_prediction.npz"
     write_dataset(output_dir=output_directory,
@@ -154,7 +290,7 @@ def train_batch(model, x, y, optimizer, loss_fn):
     return loss.data[0]
 
 
-def train(model, loader, optimizer, loss_fn, epochs=5, cutoff=None):
+def train(model, loader, optimizer, loss_fn, epochs=5, cutoff=None, print_progress=False):
     losses = list()
 
     batch_index = 0
@@ -169,7 +305,7 @@ def train(model, loader, optimizer, loss_fn, epochs=5, cutoff=None):
 
             batch_index += 1
 
-            if i % 100 == 0:
+            if print_progress and i % 100 == 0:
                 print(i, loss)
 
             i += 1
@@ -179,8 +315,9 @@ def train(model, loader, optimizer, loss_fn, epochs=5, cutoff=None):
         if cutoff is not None and i > cutoff:
             break
 
-        print("Epoch: ", e+1)
-        print("Batches: ", batch_index)
+        if print_progress:
+            print("Epoch: ", e+1)
+            print("Batches: ", batch_index)
 
     return losses
 
@@ -220,29 +357,6 @@ def test(model, loader):
     return y_predict_matrix, y_matrix, x_matrix, metadata
 
 
-# def grid_search(data_loader_train, data_loader_test):
-#     a = numpy.arange(2,5.5,step=0.25)
-#     parameter_range = [10**(-x) for x in a]
-#
-#     print("range: ", parameter_range)
-#
-#     accuracies = list()
-#     losses = list()
-#
-#     for learning_rate in parameter_range:
-#         for weight_decay in parameter_range:
-#             shallow_model = ShallowLinear()
-#
-#             loss = train(model=shallow_model, loader=data_loader_train, learning_rate=learning_rate, weight_decay=weight_decay)
-#             accuracy = test(model=shallow_model, loader=data_loader_test)
-#
-#             losses.append([learning_rate, weight_decay, loss])
-#             accuracies.append([learning_rate, weight_decay, accuracy])
-#
-#             print('\t'.join(map(str, [learning_rate, weight_decay, accuracy])))
-#             sys.stdout.flush()
-
-
 def assess_prediction(y, y_predict):
     print(y[:1, :9])
     print(y_predict[:1, :9])
@@ -266,7 +380,7 @@ def assess_prediction(y, y_predict):
     pyplot.show()
 
 
-def calculate_testing_stats(y_matrix, y_predict_matrix, x_matrix, metadata_matrix, output_directory, filter_false_positive=True, save_confusion_data=True):
+def calculate_testing_stats(y_matrix, y_predict_matrix, x_matrix, metadata_matrix, output_directory, filter_false_positive=True):
     # convert labels to flattened 1d vector
     truth_labels = numpy.squeeze(y_matrix)
     predict_labels = numpy.squeeze(y_predict_matrix).round()  #assume 0.5 threshold
@@ -300,19 +414,6 @@ def calculate_testing_stats(y_matrix, y_predict_matrix, x_matrix, metadata_matri
     true_negative = non_confusion_labels[negative_mask_nonconfusion]
     true_positive = non_confusion_labels[positive_mask_nonconfusion]
 
-    if save_confusion_data:
-        confusion_metadata = metadata_matrix[non_equivalency_mask_vector,:]
-        confusion_labels = confusion_labels.reshape((confusion_labels.shape[0],1))
-        # print(confusion_metadata.shape, confusion_vectors.shape, confusion_labels.shape)
-        confusion_data = numpy.concatenate((confusion_metadata, confusion_vectors, confusion_labels), axis=1)
-
-        # print(confusion_data[1,:])
-
-        filename = "candidate_frequencies_confusion.npz"
-        write_dataset(output_dir=output_directory,
-                      filename=filename,
-                      data=confusion_data)
-
     n_false_negative = len(false_negative)
     n_false_positive = len(false_positive)
     n_true_negative = len(true_negative)
@@ -328,77 +429,160 @@ def calculate_testing_stats(y_matrix, y_predict_matrix, x_matrix, metadata_matri
     if filter_false_positive:
         labeled_confusion_vectors = labeled_confusion_vectors[numpy.squeeze(positive_mask_confusion),:]
 
-    total_matches = numpy.sum(equivalency_mask_vector)
+    total_matches = numpy.count_nonzero(equivalency_mask_vector)
     percent_matches = float(total_matches)/len(truth_labels)
 
-    return percent_matches, total_matches, labeled_confusion_vectors, n_false_negative, n_false_positive, n_true_negative, n_true_positive
+    sensitivity = float(n_true_positive) / (n_true_positive + n_false_negative)
+    precision = float(n_true_positive) / (n_true_positive + n_false_positive)
+
+    return percent_matches, total_matches, labeled_confusion_vectors, n_false_negative, n_false_positive, n_true_negative, n_true_positive, sensitivity, precision
 
 
-def run(dataset_train, dataset_test):
+def grid_search(dataset_train, dataset_test, tsv_writer):
     # Batch size is the number of training examples used to calculate each iteration's gradient
     batch_size_train = 128
+    n_epochs = 3
 
     data_loader_train = DataLoader(dataset=dataset_train, batch_size=batch_size_train, shuffle=True)
     data_loader_test = DataLoader(dataset=dataset_test, batch_size=len(dataset_test), shuffle=False)
 
+    a = numpy.arange(2, 6.25, step=0.25)
+    parameter_range = [10 ** (-x) for x in a]
+
+    n_repetitions = 3
+
+    i = 0
+    for learning_rate in parameter_range:
+        for weight_decay in parameter_range:
+            for r in range(n_repetitions):
+                # Instantiate model
+                model = ShallowLinear()
+
+                # Initialize the optimizer with above parameters
+                optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+                # Define the loss function
+                loss_fn = nn.BCELoss()  # mean squared error
+
+                # Train and get the resulting loss per iteration
+                loss_per_iteration = train(model=model, loader=data_loader_train, optimizer=optimizer, loss_fn=loss_fn,
+                                           epochs=n_epochs, cutoff=None)
+
+                # Test and get the resulting predicted y values
+                y_predict_matrix, y_matrix, x_matrix, metadata_matrix = test(model=model, loader=data_loader_test)
+
+                stats = calculate_testing_stats(y_matrix=y_matrix,
+                                                y_predict_matrix=y_predict_matrix,
+                                                x_matrix=x_matrix,
+                                                metadata_matrix=metadata_matrix,
+                                                output_directory=None)
+
+                results = [learning_rate, weight_decay, stats[N_FALSE_NEG], stats[N_FALSE_POS], stats[N_TRUE_NEG], stats[N_TRUE_POS], stats[SENSITIVITY], stats[PRECISION]]
+                tsv_writer.append_row(results)
+
+                if i == 0:
+                    print("optimizer: ", optimizer)
+                    print("loss function: ", loss_fn)
+                    print("model: ", model)
+                    print("batch size: ", batch_size_train)
+                    print("epochs: ", n_epochs)
+
+                print(i, r, learning_rate, weight_decay)
+
+                i += 1
+
+
+def run(train_paths, test_paths, train_length, test_length, load_model=False, model_state_path=None):
+    # Batch size is the number of training examples used to calculate each iteration's gradient
+    batch_size_train = 128
+    batch_size_test = 4096
+    n_epochs = 1
+
+    cutoff = None
+    downsample = False
+
     # Define the hyperparameters
-    learning_rate = 1e-3
-    weight_decay = 1e-4
+    learning_rate = 0.005623413251903491
+    weight_decay = 1.778279410038923e-06
 
     # Instantiate model
-    model = Linear()
+    model = ShallowLinear()
 
     # Initialize the optimizer with above parameters
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     # Define the loss function
-    loss_fn = nn.BCELoss()      # mean squared error
+    loss_fn = nn.BCELoss()      # binary cross entropy loss
 
-    # Train and get the resulting loss per iteration
-    loss_per_iteration = train(model=model, loader=data_loader_train, optimizer=optimizer, loss_fn=loss_fn, epochs=1, cutoff=None)
+    # Initialize data loader
+    data_loader_test = SplitDataloader(file_paths=test_paths, length=test_length, batch_size=batch_size_test)
+
+    if not load_model:
+        # initialize training set data loader
+        data_loader_train = SplitDataloader(file_paths=train_paths, length=train_length, batch_size=batch_size_train,
+                                            downsample=downsample)
+
+        # Train and get the resulting loss per iteration
+        loss_per_iteration = train(model=model, loader=data_loader_train, optimizer=optimizer, loss_fn=loss_fn,
+                                   epochs=n_epochs, cutoff=cutoff, print_progress=True)
+    else:
+        # load previous model and test only
+        model.load_state_dict(torch.load(model_state_path))
+        loss_per_iteration = list()
 
     # Test and get the resulting predicted y values
     y_predict_matrix, y_matrix, x_matrix, metadata = test(model=model, loader=data_loader_test)
 
-    parameters = list()
-
-    parameters.append(learning_rate)
-    parameters.append(weight_decay)
-    parameters.append(weight_decay)
-
     return loss_per_iteration, y_predict_matrix, y_matrix, x_matrix, metadata, learning_rate, weight_decay, optimizer, loss_fn, model
 
 
+# def predict_sites(model_state_path, dataset_log_path):
+#     load_model = True
+#
+#     test_paths, test_length = SplitDataloader.get_all_dataset_paths(dataset_log_path=dataset_log_path)
+#
+#     print("Test set size: ", test_length)
+#
+#     y_predict_matrix, \
+#     x_matrix, \
+#     metadata_matrix, \
+#     loss_fn, \
+#     model = run(train_paths=None,
+#                 test_paths=test_paths,
+#                 train_length=None,
+#                 test_length=test_length,
+#                 load_model=load_model,
+#                 model_state_path=model_state_path)
+#
+#     predicted_coordinates = subset_coordinates_by_positive_prediction(x_matrix=x_matrix,
+#                                                                       y_predict_matrix=y_predict_matrix)
+#
+#     return predicted_coordinates
+
+
 def main():
-    data_directory = "/Users/saureous/data/candidate_frequencies/GIAB/WG/"
-    data_filename = "candidate_frequencies_chr1-18_confident.npz"
-    data_path = path.join(data_directory, data_filename)
+    load_model = False
 
-    data = numpy.load(data_path)['a']
-    data = data.reshape((data.shape[0], data.shape[1]))
-    print(data.shape)
+    model_state_path = "/home/ryan/code/variant_classifier/output/WG_GIAB_0_threshold_run_2018-4-27-10-36-23-4-117/model"
+    output_directory = "output/"
 
-    training_set_relative_size = 0.7
+    dataset_log_path = "/home/ryan/data/GIAB/filter_model_training_data/vision/WG/0_threshold/confident/chr1_19__0_all_1_coverage/dataset_log.tsv"
 
-    n_total = data.shape[0]  # data set entries
-    n_train = int(round(n_total*training_set_relative_size))  # training set entries
+    # training_set_relative_size = 0.7
+    # train_paths, test_paths, train_length, test_length = SplitDataloader.partition_dataset_paths(dataset_log_path=dataset_log_path, train_size_proportion=training_set_relative_size)
+    train_paths, test_paths, train_length, test_length = SplitDataloader.partition_dataset_paths_by_chromosome(dataset_log_path=dataset_log_path, test_chromosome_name_list=['19'])
 
-    all_indices = list(range(0, n_total))
-    random.shuffle(all_indices)
+    # for path in sorted(test_paths):
+    #     print(path)
+    # print(len(test_paths))
+    # exit()
 
-    indices_train = all_indices[:n_train]
-    indices_test = all_indices[n_train:]
+    print("Train set size: ", train_length)
+    print("Test set size: ", test_length)
 
-    data_train = data[indices_train,:]
-    data_test = data[indices_test,:]
+    header = ["learning rate", "weight decay", "false negative", "false positive", "true negative", "true positive",
+              "sensitivity", "precision"]
 
-    dataset_train = CandidateAlleleDataset(data=data_train)
-    dataset_test = CandidateAlleleDataset(data=data_test)
-
-    print("Train set size: ", dataset_train.length)
-    print("Test set size: ", dataset_test.length)
-
-    # grid_search(data_loader_train=data_loader_train, data_loader_test=data_loader_test)
     loss_per_iteration, \
     y_predict_matrix, \
     y_matrix, \
@@ -408,36 +592,38 @@ def main():
     weight_decay, \
     optimizer, \
     loss_fn, \
-    model = run(dataset_train=dataset_train,
-                dataset_test=dataset_test)
+    model = run(train_paths=train_paths,
+                test_paths=test_paths,
+                train_length=train_length,
+                test_length=test_length,
+                load_model=load_model,
+                model_state_path=model_state_path)
 
-    stats = calculate_testing_stats(y_matrix=y_matrix,
-                                    y_predict_matrix=y_predict_matrix,
-                                    x_matrix=x_matrix,
-                                    metadata_matrix=metadata_matrix,
-                                    output_directory=data_directory)
+    results_handler = ResultsHandler(y_matrix=y_matrix,
+                                     y_predict_matrix=y_predict_matrix,
+                                     x_matrix=x_matrix,
+                                     metadata_matrix=metadata_matrix,
+                                     dataset_train_length=train_length,
+                                     dataset_test_length=test_length,
+                                     loss_per_iteration=loss_per_iteration,
+                                     learning_rate=learning_rate,
+                                     weight_decay=weight_decay,
+                                     loss_fn=loss_fn,
+                                     optimizer=optimizer,
+                                     model=model,
+                                     header=header,
+                                     output_directory=output_directory)
 
-    total_false_negative = stats[N_FALSE_NEG]
-    total_true_negative = stats[N_TRUE_NEG]
-    total_false_positive = stats[N_FALSE_POS]
-    total_true_positive = stats[N_TRUE_POS]
+    results_handler.write_performance_stats()
+    results_handler.write_model_state_file()
+    results_handler.write_parameter_info()
+    results_handler.write_full_output_dataset()
+    results_handler.save_loss_plot()
 
-    print("learning rate: ", learning_rate)
-    print("weight decay: ", weight_decay)
-    print("optimizer: ", optimizer)
-    print("loss function: ", loss_fn)
-    print("model: ", model)
-
-    print("Total sensitivity\t", float(total_true_positive)/(total_true_positive+total_false_negative))
-    print("false negatives\t", total_false_negative)
-    print("false positives\t", total_false_positive)
-    print("true negatives\t", total_true_negative)
-    print("true positives\t", total_true_positive)
-
-    # save_full_output(output_logits_batches=all_predict_logits,
-    #                  truth_labels_batches=all_truth_labels,
-    #                  output_directory=output_directory,
-    #                  metadata=all_metadata)
+    # print some stats directly to stdout (redundant)
+    results_handler.print_parameter_info()
+    results_handler.print_performance_stats()
 
 
-main()
+if __name__ == "__main__":
+    main()
