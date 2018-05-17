@@ -6,12 +6,13 @@ import random
 
 
 class SplitDataloader:
-    def __init__(self, file_paths, length, batch_size, desired_n_to_p_ratio=20, downsample=False):
+    def __init__(self, file_paths, length, batch_size, desired_n_to_p_ratio=20, downsample=False, use_gpu=False):
         self.file_paths = file_paths
         self.path_iterator = iter(file_paths)
         self.length = length
         self.n_files = len(file_paths)
         self.files_loaded = 0
+        self.use_gpu = use_gpu
 
         self.batch_size = batch_size
 
@@ -144,20 +145,26 @@ class SplitDataloader:
 
         self.files_loaded += 1
 
-    @staticmethod
-    def parse_batch(batch):
+    def parse_batch(self, batch):
         import torch
 
         x = batch[:,4:-1]
         y = batch[:,-1:]
         metadata = batch[:,:4]
 
-        x_dtype = torch.FloatTensor
-        y_dtype = torch.FloatTensor     # for MSE Loss or BCE loss
-        # y_dtype = torch.LongTensor      # for CE Loss
+        if self.use_gpu:
+            x_dtype = torch.cuda.FloatTensor
+            y_dtype = torch.cuda.FloatTensor  # for MSE Loss or BCE loss
+        else:
+            x_dtype = torch.FloatTensor
+            y_dtype = torch.FloatTensor  # for MSE Loss or BCE loss
 
         x = torch.from_numpy(x).type(x_dtype)
         y = torch.from_numpy(y).type(y_dtype)
+
+        if self.use_gpu:
+            x.cuda()
+            y.cuda()
 
         return x, y, metadata
 

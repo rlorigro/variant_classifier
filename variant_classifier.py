@@ -492,7 +492,7 @@ def grid_search(dataset_train, dataset_test, tsv_writer):
                 i += 1
 
 
-def run(train_paths, test_paths, train_length, test_length, load_model=False, model_state_path=None):
+def run(train_paths, test_paths, train_length, test_length, use_gpu=False, load_model=False, model_state_path=None):
     # Batch size is the number of training examples used to calculate each iteration's gradient
     batch_size_train = 128
     batch_size_test = 4096
@@ -508,6 +508,9 @@ def run(train_paths, test_paths, train_length, test_length, load_model=False, mo
     # Instantiate model
     model = ShallowLinear()
 
+    if use_gpu:
+        model.cuda()
+
     # Initialize the optimizer with above parameters
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
@@ -520,7 +523,7 @@ def run(train_paths, test_paths, train_length, test_length, load_model=False, mo
     if not load_model:
         # initialize training set data loader
         data_loader_train = SplitDataloader(file_paths=train_paths, length=train_length, batch_size=batch_size_train,
-                                            downsample=downsample)
+                                            downsample=downsample, use_gpu=use_gpu)
 
         # Train and get the resulting loss per iteration
         loss_per_iteration = train(model=model, loader=data_loader_train, optimizer=optimizer, loss_fn=loss_fn,
@@ -562,11 +565,16 @@ def run(train_paths, test_paths, train_length, test_length, load_model=False, mo
 
 def main():
     load_model = False
+    gpu = False
 
     model_state_path = "/home/ryan/code/variant_classifier/output/WG_GIAB_0_threshold_run_2018-4-27-10-36-23-4-117/model"
     output_directory = "output/"
 
-    dataset_log_path = "/home/ryan/data/GIAB/filter_model_training_data/vision/WG/0_threshold/confident/chr1_19__0_all_1_coverage/dataset_log.tsv"
+    dataset_log_path = "/home/ryan/data/GIAB/filter_model/chr1_19__0_all_1_coverage/dataset_log.tsv"
+
+    # ensure output directory exists
+    if not path.exists(output_directory):
+        os.mkdir(output_directory)
 
     # training_set_relative_size = 0.7
     # train_paths, test_paths, train_length, test_length = SplitDataloader.partition_dataset_paths(dataset_log_path=dataset_log_path, train_size_proportion=training_set_relative_size)
@@ -597,7 +605,8 @@ def main():
                 train_length=train_length,
                 test_length=test_length,
                 load_model=load_model,
-                model_state_path=model_state_path)
+                model_state_path=model_state_path,
+                use_gpu=gpu)
 
     results_handler = ResultsHandler(y_matrix=y_matrix,
                                      y_predict_matrix=y_predict_matrix,

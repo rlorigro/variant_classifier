@@ -3,7 +3,7 @@ from TsvWriter import TsvWriter
 import numpy
 from tqdm import tqdm
 
-parent_directory_path = "/home/ryan/data/GIAB/filter_model_training_data/vision/WG/0_threshold/confident/chr1_19__0_all_1_coverage"
+parent_directory_path = "/home/ryan/data/GIAB/filter_model/chr1_19__0_all_1_coverage"
 file_extension = ".npz"
 
 file_paths = FileManager.get_all_filepaths_by_type(parent_directory_path=parent_directory_path,
